@@ -1,6 +1,19 @@
 import { redirect, Form } from "react-router";
 import type { Route } from "./+types/dashboard";
 import { getSession } from "../session.server";
+import {
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  Tooltip,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Legend,
+  ResponsiveContainer as ResponsiveContainerBar,
+} from "recharts";
 
 export function meta({}: Route.MetaArgs) {
   return [{ title: "Dashboard — Git Activity Tracker" }];
@@ -37,6 +50,233 @@ interface Repo {
   fork: boolean;
 }
 
+interface ContributionsBreakdown {
+  totalCommitContributions: number;
+  totalPullRequestContributions: number;
+  totalIssueContributions: number;
+  totalPullRequestReviewContributions: number;
+}
+
+interface RepoCommitContribution {
+  repository: {
+    name: string;
+  };
+  contributions: {
+    totalCount: number;
+  };
+}
+
+interface LanguageEdge {
+  size: number;
+  node: {
+    name: string;
+    color: string;
+  };
+}
+
+// ─── Utils ────────────────────────────────────────────────────────────────────
+
+function calculateStreaks(calendar: ContributionCalendar) {
+  const allDays = calendar.weeks
+    .flatMap((w) => w.contributionDays)
+    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  let currentStreak = 0;
+  let longestStreak = 0;
+  let tempStreak = 0;
+
+  const today = new Date().toISOString().split("T")[0];
+
+  for (let i = 0; i < allDays.length; i++) {
+    if (allDays[i].contributionCount > 0) {
+      tempStreak++;
+      if (tempStreak > longestStreak) longestStreak = tempStreak;
+    } else {
+      // If it's not today, we reset tempStreak
+      if (allDays[i].date !== today) {
+        tempStreak = 0;
+      }
+    }
+
+    if (allDays[i].date === today) {
+      currentStreak = tempStreak;
+    }
+  }
+
+  // If today has no contributions, check if yesterday was part of a streak
+  if (currentStreak === 0) {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split("T")[0];
+    const yesterdayData = allDays.find((d) => d.date === yesterdayStr);
+    
+    if (yesterdayData && yesterdayData.contributionCount > 0) {
+      // We need to re-calculate for yesterday to be sure
+      let yStreak = 0;
+      for (let i = 0; i < allDays.length; i++) {
+        if (allDays[i].contributionCount > 0) {
+          yStreak++;
+        } else {
+          if (allDays[i].date === yesterdayStr) break;
+          yStreak = 0;
+        }
+        if (allDays[i].date === yesterdayStr) break;
+      }
+      currentStreak = yStreak;
+    }
+  }
+
+  return { currentStreak, longestStreak };
+}
+
+// ─── Components ───────────────────────────────────────────────────────────────
+
+function StreakCard({ current, longest }: { current: number; longest: number }) {
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
+        <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">Current Streak</p>
+        <div className="flex items-baseline gap-2">
+          <span className="text-3xl font-bold text-orange-500">{current}</span>
+          <span className="text-sm text-gray-400 font-medium">days</span>
+        </div>
+      </div>
+      <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
+        <p className="text-sm text-gray-500 dark:text-gray-400 mb-1">Longest Streak</p>
+        <div className="flex items-baseline gap-2">
+          <span className="text-3xl font-bold text-indigo-500">{longest}</span>
+          <span className="text-sm text-gray-400 font-medium">days</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ContributionsBreakdownChart({ breakdown }: { breakdown: ContributionsBreakdown }) {
+  const data = [
+    { name: "Commits", value: breakdown.totalCommitContributions, color: "#6366f1" },
+    { name: "PRs", value: breakdown.totalPullRequestContributions, color: "#22c55e" },
+    { name: "Issues", value: breakdown.totalIssueContributions, color: "#eab308" },
+    { name: "Reviews", value: breakdown.totalPullRequestReviewContributions, color: "#ec4899" },
+  ].filter((d) => d.value > 0);
+
+  if (data.length === 0) return null;
+
+  return (
+    <div className="h-[240px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={data}
+            innerRadius={60}
+            outerRadius={80}
+            paddingAngle={5}
+            dataKey="value"
+            stroke="none"
+          >
+            {data.map((entry, index) => (
+              <Cell key={`cell-${index}`} fill={entry.color} />
+            ))}
+          </Pie>
+          <Tooltip
+            contentStyle={{
+              backgroundColor: "#1f2937",
+              border: "none",
+              borderRadius: "8px",
+              color: "#f3f4f6",
+              fontSize: "12px",
+            }}
+            itemStyle={{ color: "#f3f4f6" }}
+          />
+          <Legend verticalAlign="bottom" height={36} iconType="circle" />
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function TopReposChart({ topRepos }: { topRepos: RepoCommitContribution[] }) {
+  const data = topRepos
+    .map((r) => ({
+      name: r.repository.name,
+      commits: r.contributions.totalCount,
+    }))
+    .sort((a, b) => b.commits - a.commits);
+
+  if (data.length === 0) return null;
+
+  return (
+    <div className="h-[240px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} layout="vertical" margin={{ left: 0, right: 30, top: 0, bottom: 0 }}>
+          <XAxis type="number" hide />
+          <YAxis
+            dataKey="name"
+            type="category"
+            width={100}
+            axisLine={false}
+            tickLine={false}
+            tick={{ fontSize: 11, fill: "#9ca3af" }}
+          />
+          <Tooltip
+            cursor={{ fill: "transparent" }}
+            contentStyle={{
+              backgroundColor: "#1f2937",
+              border: "none",
+              borderRadius: "8px",
+              color: "#f3f4f6",
+              fontSize: "12px",
+            }}
+          />
+          <Bar dataKey="commits" fill="#6366f1" radius={[0, 4, 4, 0]} barSize={20} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function LanguageDistributionChart({ languages }: { languages: any[] }) {
+  if (languages.length === 0) return null;
+
+  return (
+    <div className="h-[240px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={languages}
+            innerRadius={60}
+            outerRadius={80}
+            paddingAngle={2}
+            dataKey="size"
+            nameKey="name"
+            stroke="none"
+          >
+            {languages.map((entry, index) => (
+              <Cell key={`cell-${index}`} fill={entry.color || "#8b949e"} />
+            ))}
+          </Pie>
+          <Tooltip
+            contentStyle={{
+              backgroundColor: "#1f2937",
+              border: "none",
+              borderRadius: "8px",
+              color: "#f3f4f6",
+              fontSize: "12px",
+            }}
+            formatter={(value: number) => `${(value / 1024 / 1024).toFixed(1)} MB`}
+          />
+          <Legend
+            verticalAlign="bottom"
+            height={36}
+            iconType="circle"
+            formatter={(value) => <span className="text-[10px]">{value}</span>}
+          />
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 // ─── Loader ───────────────────────────────────────────────────────────────────
 
 export async function loader({ request }: Route.LoaderArgs) {
@@ -56,6 +296,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     query($username: String!) {
       user(login: $username) {
         contributionsCollection {
+          totalCommitContributions
+          totalPullRequestContributions
+          totalIssueContributions
+          totalPullRequestReviewContributions
           contributionCalendar {
             totalContributions
             weeks {
@@ -63,6 +307,27 @@ export async function loader({ request }: Route.LoaderArgs) {
                 contributionCount
                 date
                 weekday
+              }
+            }
+          }
+          commitContributionsByRepository(maxRepositories: 10) {
+            repository {
+              name
+            }
+            contributions {
+              totalCount
+            }
+          }
+        }
+        repositories(first: 100, ownerAffiliations: OWNER, orderBy: {field: PUSHED_AT, direction: DESC}) {
+          nodes {
+            languages(first: 10) {
+              edges {
+                size
+                node {
+                  name
+                  color
+                }
               }
             }
           }
@@ -88,11 +353,38 @@ export async function loader({ request }: Route.LoaderArgs) {
     graphqlRes.ok ? graphqlRes.json() : Promise.resolve({}),
   ]);
 
-  const calendar: ContributionCalendar =
-    graphqlData?.data?.user?.contributionsCollection?.contributionCalendar ?? {
-      totalContributions: 0,
-      weeks: [],
-    };
+  const user = graphqlData?.data?.user;
+  const collection = user?.contributionsCollection;
+  
+  const calendar: ContributionCalendar = collection?.contributionCalendar ?? {
+    totalContributions: 0,
+    weeks: [],
+  };
+
+  const breakdown: ContributionsBreakdown = {
+    totalCommitContributions: collection?.totalCommitContributions ?? 0,
+    totalPullRequestContributions: collection?.totalPullRequestContributions ?? 0,
+    totalIssueContributions: collection?.totalIssueContributions ?? 0,
+    totalPullRequestReviewContributions: collection?.totalPullRequestReviewContributions ?? 0,
+  };
+
+  const topRepos: RepoCommitContribution[] = collection?.commitContributionsByRepository ?? [];
+
+  // Aggregate languages
+  const langMap: Record<string, { size: number; color: string }> = {};
+  user?.repositories?.nodes?.forEach((repo: any) => {
+    repo.languages?.edges?.forEach((edge: LanguageEdge) => {
+      if (!langMap[edge.node.name]) {
+        langMap[edge.node.name] = { size: 0, color: edge.node.color };
+      }
+      langMap[edge.node.name].size += edge.size;
+    });
+  });
+
+  const languages = Object.entries(langMap)
+    .map(([name, { size, color }]) => ({ name, size, color }))
+    .sort((a, b) => b.size - a.size)
+    .slice(0, 10);
 
   return {
     login,
@@ -100,6 +392,9 @@ export async function loader({ request }: Route.LoaderArgs) {
     avatar: session.get("avatar") as string,
     repos: Array.isArray(repos) ? (repos as Repo[]) : [],
     calendar,
+    breakdown,
+    topRepos,
+    languages,
   };
 }
 
@@ -310,7 +605,8 @@ function RepoCard({ repo }: { repo: Repo }) {
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function Dashboard({ loaderData }: Route.ComponentProps) {
-  const { login, name, avatar, repos, calendar } = loaderData;
+  const { login, name, avatar, repos, calendar, breakdown, topRepos, languages } = loaderData;
+  const { currentStreak, longestStreak } = calculateStreaks(calendar);
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 font-[Inter,sans-serif]">
@@ -340,6 +636,25 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-8 space-y-8">
+        <StreakCard current={currentStreak} longest={longestStreak} />
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <section className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
+            <h2 className="text-sm font-semibold mb-4">Work Breakdown</h2>
+            <ContributionsBreakdownChart breakdown={breakdown} />
+          </section>
+
+          <section className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
+            <h2 className="text-sm font-semibold mb-4">Top Repositories</h2>
+            <TopReposChart topRepos={topRepos} />
+          </section>
+
+          <section className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
+            <h2 className="text-sm font-semibold mb-4">Languages</h2>
+            <LanguageDistributionChart languages={languages} />
+          </section>
+        </div>
+
         {/* Contribution heatmap */}
         <section className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 shadow-sm">
           <h2 className="text-base font-semibold mb-5">Contribution Activity</h2>
@@ -349,7 +664,7 @@ export default function Dashboard({ loaderData }: Route.ComponentProps) {
         {/* Repositories */}
         <section>
           <h2 className="text-base font-semibold mb-4">
-            Repositories
+            Recent Activity
             <span className="ml-2 text-sm font-normal text-gray-400">({repos.length})</span>
           </h2>
           {repos.length === 0 ? (
